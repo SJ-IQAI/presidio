@@ -1,3 +1,43 @@
+# EDIT 
+(Sayantan Bhadra) This is a forked repository from Microsoft Presidio to perform pixel deidentification on DICOMs. It includes fixes to bit-length mismatches in DICOM headers and inconsistencies in de-compression using pydicom on RGB images.
+
+## Installation
+Step 1: Install Tesseract OCR engine (for Mac users use Homebrew)
+
+Step 2: Create new conda environment with Python 3.10 and activate the environment.
+
+Step 3: Clone this repository. Then navigate to 
+
+``cd presidio-image-redactor``
+
+Step 4: Use pip to install:
+
+``pip install .``
+
+Step 5: Download default spacy model needed for Presidio Analyzer:
+
+``python -m spacy download en_core_web_lg``
+
+## Quick start with DICOM images
+```python
+import pydicom
+from presidio_image_redactor import DicomImageRedactorEngine
+
+# Set input and output paths
+input_path = "path/to/your/dicom/file.dcm"
+output_dir = "./output"
+
+# Initialize the engine
+engine = DicomImageRedactorEngine()
+
+# Redact from a loaded DICOM image
+dicom_image = pydicom.dcmread(input_path)
+redacted_dicom_image = engine.redact(dicom_image, fill="background")
+redacted_dicom_image.save_as(f"{output_dir}/redacted_file.dcm")
+```
+
+(end of EDIT)
+
 # Presidio - Data Protection and De-identification SDK
 
 **Context aware, pluggable and customizable PII de-identification service for text and images.**
