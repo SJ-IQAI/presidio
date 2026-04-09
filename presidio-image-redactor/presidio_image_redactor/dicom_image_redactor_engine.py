@@ -761,12 +761,15 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
             raise ValueError("fill must be 'contrast' or 'background'")
 
         is_greyscale = cls._check_if_greyscale(instance)
+        pixel_arr = instance.pixel_array
+        if pixel_arr.dtype != np.uint8:
+            pixel_arr = ((pixel_arr - pixel_arr.min()) / max(pixel_arr.max() - pixel_arr.min(), 1) * 255).astype(np.uint8)
         if is_greyscale:
             # model L for grayscale, and has 8 bit-pixel to store the pixel value
-            image_pil = Image.fromarray(instance.pixel_array, mode="L")
+            image_pil = Image.fromarray(pixel_arr, mode="L")
         else:
             # model RGB, has 3x8 bit pixel available to store the value
-            image_pil = Image.fromarray(instance.pixel_array, mode="RGB")
+            image_pil = Image.fromarray(pixel_arr, mode="RGB")
         box_color = cls._get_bg_color(image_pil, is_greyscale, invert_flag)
 
         return box_color
@@ -808,6 +811,15 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         :return: Instance with compressed pixel data.
         """
         compression_method = pydicom.uid.RLELossless
+
+        # Ensure BitsAllocated is compatible with RLE Lossless.
+        # After decompression the pixel data dtype reflects BitsStored,
+        # so align BitsAllocated to the nearest valid value (8 or 16).
+        bits_stored = instance.BitsStored
+        if bits_stored <= 8:
+            instance.BitsAllocated = 8
+        elif bits_stored <= 16:
+            instance.BitsAllocated = 16
 
         # Temporarily change syntax to an "uncompressed" method
         instance.file_meta.TransferSyntaxUID = pydicom.uid.UID("1.2.840.10008.1.2")
@@ -884,13 +896,26 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
                 box_color
             )
 
-        redacted_instance.PixelData = redacted_instance.pixel_array.tobytes()
+        # pixel_array is always returned in interleaved order (R,G,B,R,G,B,...)
+        # by pydicom, regardless of the original PlanarConfiguration.
+        # Cast to match BitsStored before writing back.
+        pixel_arr = redacted_instance.pixel_array
+        bits_stored = redacted_instance.BitsStored
+        if bits_stored <= 8 and pixel_arr.dtype != np.uint8:
+            pixel_arr = pixel_arr.astype(np.uint8)
+            redacted_instance.BitsAllocated = 8
+
+        redacted_instance.PixelData = pixel_arr.tobytes()
+
+        # Ensure PlanarConfiguration=0 (interleaved) to match pixel_array layout
+        if getattr(redacted_instance, "SamplesPerPixel", 1) > 1:
+            redacted_instance.PlanarConfiguration = 0
 
         # If original pixel data is compressed, recompress after redaction
         if is_compressed or has_image_icon_sequence:
-            # Temporary "fix" to manually set all YBR photometric interp as YBR_FULL
+            # RLE Lossless requires RGB for color images, not YBR variants
             if "YBR" in redacted_instance.PhotometricInterpretation:
-                redacted_instance.PhotometricInterpretation = "YBR_FULL"
+                redacted_instance.PhotometricInterpretation = "RGB"
             redacted_instance = cls._compress_pixel_data(redacted_instance)
 
         return redacted_instance
