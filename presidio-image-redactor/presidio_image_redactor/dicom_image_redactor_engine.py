@@ -9,7 +9,7 @@ import numpy as np
 import pydicom
 from matplotlib import pyplot as plt  # necessary import for PIL typing # noqa: F401
 from PIL import Image, ImageOps
-from presidio_analyzer import PatternRecognizer
+from presidio_analyzer import Pattern, PatternRecognizer
 from pydicom.multival import MultiValue
 from pydicom.pixel_data_handlers.util import apply_voi_lut
 
@@ -544,18 +544,20 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
     @staticmethod
     def _get_text_metadata(
         instance: pydicom.dataset.FileDataset,
-    ) -> Tuple[list, list, list]:
+    ) -> Tuple[list, list, list, list]:
         """Retrieve all text metadata from the DICOM image.
 
         :param instance: Loaded DICOM instance.
 
         :return: List of all the instance's element values (excluding pixel data),
         bool for if the element is specified as being a name,
-        bool for if the element is specified as being related to the patient.
+        bool for if the element is specified as being related to the patient,
+        bool for if the element is an accession number.
         """
         metadata_text = list()
         is_name = list()
         is_patient = list()
+        is_accession = list()
 
         for element in instance:
             # Save all metadata except the DICOM image itself
@@ -574,12 +576,19 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
                     is_patient.append(True)
                 else:
                     is_patient.append(False)
+
+                # Track whether this particular element is an accession number
+                if "accession" in element.name.lower():
+                    is_accession.append(True)
+                else:
+                    is_accession.append(False)
             else:
                 metadata_text.append("")
                 is_name.append(False)
                 is_patient.append(False)
+                is_accession.append(False)
 
-        return metadata_text, is_name, is_patient
+        return metadata_text, is_name, is_patient, is_accession
 
     @staticmethod
     def augment_word(word: str, case_sensitive: bool = False) -> list:
@@ -692,6 +701,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         original_metadata: List[Union[pydicom.multival.MultiValue, list, tuple]],
         is_name: List[bool],
         is_patient: List[bool],
+        is_accession: List[bool] = None,
     ) -> list:
         """Build a list of PHI strings for the ad-hoc recognizer.
 
@@ -704,6 +714,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         :param is_name: True if the element is specified as being a name.
         :param is_patient: True if the element is specified as being
         related to the patient.
+        :param is_accession: True if the element is an accession number.
 
         :return: List of PHI (str) to use with Presidio ad-hoc recognizer.
         """
@@ -711,6 +722,8 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         phi: list = []
         phi.extend(cls._process_names(original_metadata, is_name))
         phi.extend(cls._process_names(original_metadata, is_patient))
+        if is_accession:
+            phi.extend(cls._process_names(original_metadata, is_accession))
         phi = cls._add_known_generic_phi(phi)
 
         # 2) Flatten safely (MultiValue/list/tuple) and stringify
@@ -948,16 +961,27 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
 
         # Create custom recognizer using DICOM metadata
         if use_metadata:
-            original_metadata, is_name, is_patient = self._get_text_metadata(instance)
-            phi_list = self._make_phi_list(original_metadata, is_name, is_patient)
+            original_metadata, is_name, is_patient, is_accession = self._get_text_metadata(instance)
+            phi_list = self._make_phi_list(original_metadata, is_name, is_patient, is_accession)
             deny_list_recognizer = PatternRecognizer(
                 supported_entity="PERSON", deny_list=phi_list
             )
 
+            # Catch age patterns like "4Y", "06Y", "004Y" burned into pixels
+            age_pattern = Pattern(
+                name="age_years_pattern",
+                regex=r"\b\d{1,3}Y\b",
+                score=0.85,
+            )
+            age_recognizer = PatternRecognizer(
+                supported_entity="AGE",
+                patterns=[age_pattern],
+            )
+
             if ad_hoc_recognizers is None:
-                ad_hoc_recognizers = [deny_list_recognizer]
+                ad_hoc_recognizers = [deny_list_recognizer, age_recognizer]
             elif isinstance(ad_hoc_recognizers, list):
-                ad_hoc_recognizers.append(deny_list_recognizer)
+                ad_hoc_recognizers.extend([deny_list_recognizer, age_recognizer])
 
         # Detect PII
         if ad_hoc_recognizers is None:
