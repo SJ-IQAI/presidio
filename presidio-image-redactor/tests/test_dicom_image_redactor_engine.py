@@ -565,13 +565,13 @@ def test_get_text_metadata_happy_path(
     test_instance = pydicom.dcmread(dcm_path)
 
     # Act
-    test_metadata_text, test_is_name, test_is_patient, test_is_accession = mock_engine._get_text_metadata(test_instance)
+    test_metadata_text, test_is_name, test_is_patient, test_is_accession, test_is_time = mock_engine._get_text_metadata(test_instance)
 
     # Assert
     idx_is_name = list(np.where(np.array(test_is_name) == True)[0])
     idx_is_patient = list(np.where(np.array(test_is_patient) == True)[0])
 
-    assert len(test_metadata_text) == len(test_is_name) == len(test_is_patient) == len(test_is_accession)
+    assert len(test_metadata_text) == len(test_is_name) == len(test_is_patient) == len(test_is_accession) == len(test_is_time)
     assert len(idx_is_name) == is_name_true_len
     assert len(idx_is_patient) == is_patient_true_len
     assert type(test_metadata_text[idx_is_name[0]]) == str

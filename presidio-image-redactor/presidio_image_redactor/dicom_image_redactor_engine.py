@@ -313,6 +313,20 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         return is_greyscale
 
     @staticmethod
+    def _normalize_pixel_array(
+        pixel_arr: np.ndarray, is_greyscale: bool
+    ) -> np.ndarray:
+        """Strip leading frame dimensions from a pixel array.
+
+        Multi-frame DICOMs with a single frame can have extra leading
+        dimensions, e.g. (1, 1, 850, 3). This reduces the array to
+        2D for greyscale or 3D for color images.
+        """
+        while pixel_arr.ndim > 3 or (is_greyscale and pixel_arr.ndim > 2):
+            pixel_arr = pixel_arr[0]
+        return pixel_arr
+
+    @staticmethod
     def _rescale_dcm_pixel_array(
         instance: pydicom.dataset.FileDataset, is_greyscale: bool
     ) -> np.ndarray:
@@ -331,6 +345,10 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
                 image_2d = instance.pixel_array
         else:
             image_2d = instance.pixel_array
+
+        image_2d = DicomImageRedactorEngine._normalize_pixel_array(
+            image_2d, is_greyscale
+        )
 
         # Convert to float to avoid overflow or underflow losses.
         image_2d_float = image_2d.astype(float)
@@ -544,7 +562,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
     @staticmethod
     def _get_text_metadata(
         instance: pydicom.dataset.FileDataset,
-    ) -> Tuple[list, list, list, list]:
+    ) -> Tuple[list, list, list, list, list]:
         """Retrieve all text metadata from the DICOM image.
 
         :param instance: Loaded DICOM instance.
@@ -552,12 +570,14 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         :return: List of all the instance's element values (excluding pixel data),
         bool for if the element is specified as being a name,
         bool for if the element is specified as being related to the patient,
-        bool for if the element is an accession number.
+        bool for if the element is an accession number,
+        bool for if the element is a time field.
         """
         metadata_text = list()
         is_name = list()
         is_patient = list()
         is_accession = list()
+        is_time = list()
 
         for element in instance:
             # Save all metadata except the DICOM image itself
@@ -582,13 +602,20 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
                     is_accession.append(True)
                 else:
                     is_accession.append(False)
+
+                # Track whether this particular element is a time field
+                if "time" in element.name.lower():
+                    is_time.append(True)
+                else:
+                    is_time.append(False)
             else:
                 metadata_text.append("")
                 is_name.append(False)
                 is_patient.append(False)
                 is_accession.append(False)
+                is_time.append(False)
 
-        return metadata_text, is_name, is_patient, is_accession
+        return metadata_text, is_name, is_patient, is_accession, is_time
 
     @staticmethod
     def augment_word(word: str, case_sensitive: bool = False) -> list:
@@ -702,6 +729,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         is_name: List[bool],
         is_patient: List[bool],
         is_accession: List[bool] = None,
+        is_time: List[bool] = None,
     ) -> list:
         """Build a list of PHI strings for the ad-hoc recognizer.
 
@@ -715,6 +743,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         :param is_patient: True if the element is specified as being
         related to the patient.
         :param is_accession: True if the element is an accession number.
+        :param is_time: True if the element is a time field.
 
         :return: List of PHI (str) to use with Presidio ad-hoc recognizer.
         """
@@ -724,6 +753,8 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         phi.extend(cls._process_names(original_metadata, is_patient))
         if is_accession:
             phi.extend(cls._process_names(original_metadata, is_accession))
+        if is_time:
+            phi.extend(cls._process_names(original_metadata, is_time))
         phi = cls._add_known_generic_phi(phi)
 
         # 2) Flatten safely (MultiValue/list/tuple) and stringify
@@ -775,6 +806,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
 
         is_greyscale = cls._check_if_greyscale(instance)
         pixel_arr = instance.pixel_array
+        pixel_arr = cls._normalize_pixel_array(pixel_arr, is_greyscale)
         if pixel_arr.dtype != np.uint8:
             pixel_arr = ((pixel_arr - pixel_arr.min()) / max(pixel_arr.max() - pixel_arr.min(), 1) * 255).astype(np.uint8)
         if is_greyscale:
@@ -891,8 +923,19 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
             redacted_instance
         )
 
-        # Select masking box color
+        # Normalize pixel array shape for multi-frame DICOMs with a single frame
         is_greyscale = cls._check_if_greyscale(instance)
+        pixel_arr = cls._normalize_pixel_array(
+            redacted_instance.pixel_array, is_greyscale
+        )
+        if pixel_arr.shape != redacted_instance.pixel_array.shape:
+            redacted_instance.Rows = pixel_arr.shape[0]
+            redacted_instance.Columns = pixel_arr.shape[1]
+            if hasattr(redacted_instance, "NumberOfFrames"):
+                del redacted_instance.NumberOfFrames
+            redacted_instance.PixelData = pixel_arr.tobytes()
+
+        # Select masking box color
         if is_greyscale:
             box_color = cls._get_most_common_pixel_value(instance, crop_ratio, fill)
         else:
@@ -961,8 +1004,8 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
 
         # Create custom recognizer using DICOM metadata
         if use_metadata:
-            original_metadata, is_name, is_patient, is_accession = self._get_text_metadata(instance)
-            phi_list = self._make_phi_list(original_metadata, is_name, is_patient, is_accession)
+            original_metadata, is_name, is_patient, is_accession, is_time = self._get_text_metadata(instance)
+            phi_list = self._make_phi_list(original_metadata, is_name, is_patient, is_accession, is_time)
             deny_list_recognizer = PatternRecognizer(
                 supported_entity="PERSON", deny_list=phi_list
             )
@@ -978,10 +1021,32 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
                 patterns=[age_pattern],
             )
 
+            # Catch time patterns burned into pixels:
+            # 12-hour: 2:30:25PM, 11:05:00 AM, 1:30PM
+            # 24-hour: 14:30:25, 08:05:00
+            time_12h_pattern = Pattern(
+                name="time_12h_pattern",
+                regex=r"\b\d{1,2}:\d{2}(:\d{2})?\s?[AaPp][Mm]\b",
+                score=0.85,
+            )
+            time_24h_pattern = Pattern(
+                name="time_24h_pattern",
+                regex=r"\b\d{1,2}:\d{2}(:\d{2})?\b",
+                score=0.6,
+            )
+            time_recognizer = PatternRecognizer(
+                supported_entity="TIME",
+                patterns=[time_12h_pattern, time_24h_pattern],
+            )
+
             if ad_hoc_recognizers is None:
-                ad_hoc_recognizers = [deny_list_recognizer, age_recognizer]
+                ad_hoc_recognizers = [
+                    deny_list_recognizer, age_recognizer, time_recognizer,
+                ]
             elif isinstance(ad_hoc_recognizers, list):
-                ad_hoc_recognizers.extend([deny_list_recognizer, age_recognizer])
+                ad_hoc_recognizers.extend(
+                    [deny_list_recognizer, age_recognizer, time_recognizer]
+                )
 
         # Detect PII
         if ad_hoc_recognizers is None:
@@ -1067,7 +1132,8 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         try:
             instance.PixelData
         except AttributeError:
-            raise AttributeError("Provided DICOM file lacks pixel data.")
+            print(f"Skipping (no pixel data): {dst_path}")
+            return dst_path
 
         is_greyscale = self._check_if_greyscale(instance)
         image = self._rescale_dcm_pixel_array(instance, is_greyscale)
