@@ -13,12 +13,16 @@ Examples:
 
     # Also scrub PHI metadata tags from the output files
     python redact_dicom.py /path/to/dicoms /path/to/output --scrub-metadata
+
+    # Disable automatic UI frame blackout
+    python redact_dicom.py /path/to/dicoms /path/to/output --no-blackout-ui-frames
 """
 
 import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pydicom
 
 from presidio_image_redactor import DicomImageRedactorEngine
@@ -34,6 +38,82 @@ PHI_TAGS = [
     "SeriesDescription", "InstitutionalDepartmentName",
     "DeviceSerialNumber", "ProtocolName", "StudyID",
 ]
+
+
+# Secondary Capture Image Storage SOP Class UID
+SC_SOP_CLASS_UID = "1.2.840.10008.5.1.4.1.1.7"
+
+
+def is_ui_frame(ds: pydicom.Dataset) -> bool:
+    """Detect whether a DICOM file is a UI/settings frame using metadata.
+
+    Vendor-specific rules:
+      GE:      SC + ConversionType WSD + InstanceNumber in (0, 1, 256)
+      Siemens: SC + ImageType contains EXAMPROTOCOL
+      Philips: SC + ConversionType WSD + ImageType == ['DERIVED', 'PRIMARY']
+
+    :param ds: A pydicom Dataset (header only is sufficient).
+    :return: True if the file appears to be a UI frame.
+    """
+    sop_uid = str(getattr(ds, "SOPClassUID", ""))
+    if sop_uid != SC_SOP_CLASS_UID:
+        return False
+
+    instance_num = getattr(ds, "InstanceNumber", None)
+    conversion_type = getattr(ds, "ConversionType", "")
+    image_type = list(getattr(ds, "ImageType", []))
+    manufacturer = getattr(ds, "Manufacturer", "").upper()
+
+    # GE: patient-info screen — SC + WSD + low instance number
+    if "GE" in manufacturer:
+        return conversion_type == "WSD" and instance_num in (0, 1, 256)
+
+    # Siemens: exam protocol sheet — SC + EXAMPROTOCOL in ImageType
+    if "SIEMENS" in manufacturer:
+        return "EXAMPROTOCOL" in image_type
+
+    # Philips: dose report — SC + WSD + DERIVED/PRIMARY only
+    if "PHILIPS" in manufacturer:
+        return conversion_type == "WSD" and image_type == ["DERIVED", "PRIMARY"]
+
+    # Unknown vendor: fall back to generic SC + low instance + WSD
+    return conversion_type == "WSD" and instance_num in (0, 1)
+
+
+def blackout_ui_frames(output_dir: Path) -> int:
+    """Scan output DICOM files and black out any that are UI/settings frames.
+
+    Detection is metadata-based (no OCR needed): Secondary Capture + InstanceNumber 0
+    + ConversionType WSD.
+
+    :param output_dir: Directory containing redacted DICOM files.
+    :return: Number of frames blacked out.
+    """
+    print(f"  Scanning for UI frames (metadata-based)...")
+    count = 0
+    for dcm_file in sorted(output_dir.rglob("*.dcm")):
+        try:
+            ds = pydicom.dcmread(str(dcm_file))
+        except Exception as e:
+            print(f"  Skipping {dcm_file.name}: {e}")
+            continue
+
+        if is_ui_frame(ds):
+            try:
+                pixel_arr = ds.pixel_array
+                ds.PixelData = np.zeros_like(pixel_arr).tobytes()
+                # Switch to uncompressed transfer syntax so pydicom
+                # doesn't complain about raw bytes in a compressed TS
+                ds.file_meta.TransferSyntaxUID = pydicom.uid.ExplicitVRLittleEndian
+                ds.is_implicit_VR = False
+                ds.is_little_endian = True
+                ds.save_as(str(dcm_file))
+                print(f"  Blacked out UI frame: {dcm_file.name}")
+                count += 1
+            except Exception as e:
+                print(f"  Could not black out {dcm_file.name}: {e}")
+
+    return count
 
 
 def build_engine(ocr_type: str) -> DicomImageRedactorEngine:
@@ -98,6 +178,8 @@ def main() -> None:
                         help="Disable metadata-based redaction of burned-in text")
     parser.add_argument("--scrub-metadata", action="store_true",
                         help="Also blank PHI metadata tags in the output DICOM files")
+    parser.add_argument("--no-blackout-ui-frames", action="store_true",
+                        help="Disable automatic detection and blackout of UI/settings frames (e.g. GE patient info screens)")
     args = parser.parse_args()
 
     if not args.input.is_dir():
@@ -118,6 +200,10 @@ def main() -> None:
             print(f"Processing: {subdir.name}")
             try:
                 redact_directory(engine, subdir, output_dir, args.ocr_threshold, args.fill, not args.no_metadata)
+                if not args.no_blackout_ui_frames:
+                    n = blackout_ui_frames(output_dir)
+                    if n:
+                        print(f"  Blacked out {n} UI frame(s)")
                 if args.scrub_metadata:
                     scrub_metadata(output_dir)
                 print(f"  Done: {subdir.name}")
@@ -128,6 +214,10 @@ def main() -> None:
         print(f"Processing: {args.input}")
         try:
             redact_directory(engine, args.input, args.output, args.ocr_threshold, args.fill, not args.no_metadata)
+            if not args.no_blackout_ui_frames:
+                n = blackout_ui_frames(args.output)
+                if n:
+                    print(f"Blacked out {n} UI frame(s)")
             if args.scrub_metadata:
                 scrub_metadata(args.output)
             print("Done")

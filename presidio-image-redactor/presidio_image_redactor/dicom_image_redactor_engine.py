@@ -1222,18 +1222,21 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         # Process each DICOM file directly
         all_dcm_files = self._get_all_dcm_files(Path(dst_dir))
         for dst_path in all_dcm_files:
-            self._redact_single_dicom_image(
-                dst_path,
-                crop_ratio,
-                fill,
-                padding_width,
-                use_metadata,
-                overwrite,
-                dst_parent_dir,
-                save_bboxes,
-                ocr_kwargs=ocr_kwargs,
-                ad_hoc_recognizers=ad_hoc_recognizers,
-                **text_analyzer_kwargs,
-            )
+            try:
+                self._redact_single_dicom_image(
+                    dst_path,
+                    crop_ratio,
+                    fill,
+                    padding_width,
+                    use_metadata,
+                    overwrite,
+                    dst_parent_dir,
+                    save_bboxes,
+                    ocr_kwargs=ocr_kwargs,
+                    ad_hoc_recognizers=ad_hoc_recognizers,
+                    **text_analyzer_kwargs,
+                )
+            except Exception as e:
+                print(f"Skipping {dst_path} (error: {e})")
 
         return dst_dir
