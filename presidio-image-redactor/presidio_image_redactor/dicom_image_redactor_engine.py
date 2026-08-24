@@ -287,10 +287,11 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         extensions = ["[dD][cC][mM]", "[dD][iI][cC][oO][mM]"]
 
         # Get all files with any applicable extension
+        # Skip macOS AppleDouble sidecar files (they start with "._")
         all_files = []
         for extension in extensions:
             p = dcm_dir.glob(f"**/*.{extension}")
-            files = [x for x in p if x.is_file()]
+            files = [x for x in p if x.is_file() and not x.name.startswith("._")]
             all_files += files
 
         return all_files
@@ -1126,8 +1127,12 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         else:
             dst_path = dcm_path
 
-        # Load instance
-        instance = pydicom.dcmread(dst_path)
+        # Load instance — retry with force=True if DICM preamble is missing
+        try:
+            instance = pydicom.dcmread(dst_path)
+        except pydicom.errors.InvalidDicomError:
+            print(f"Retrying {dst_path} with force=True (missing DICM preamble)")
+            instance = pydicom.dcmread(dst_path, force=True)
 
         try:
             instance.PixelData
@@ -1222,18 +1227,21 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         # Process each DICOM file directly
         all_dcm_files = self._get_all_dcm_files(Path(dst_dir))
         for dst_path in all_dcm_files:
-            self._redact_single_dicom_image(
-                dst_path,
-                crop_ratio,
-                fill,
-                padding_width,
-                use_metadata,
-                overwrite,
-                dst_parent_dir,
-                save_bboxes,
-                ocr_kwargs=ocr_kwargs,
-                ad_hoc_recognizers=ad_hoc_recognizers,
-                **text_analyzer_kwargs,
-            )
+            try:
+                self._redact_single_dicom_image(
+                    dst_path,
+                    crop_ratio,
+                    fill,
+                    padding_width,
+                    use_metadata,
+                    overwrite,
+                    dst_parent_dir,
+                    save_bboxes,
+                    ocr_kwargs=ocr_kwargs,
+                    ad_hoc_recognizers=ad_hoc_recognizers,
+                    **text_analyzer_kwargs,
+                )
+            except Exception as e:
+                print(f"Skipping {dst_path} (error: {e})")
 
         return dst_dir
