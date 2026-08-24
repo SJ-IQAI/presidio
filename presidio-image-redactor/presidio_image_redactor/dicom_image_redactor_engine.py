@@ -287,10 +287,11 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         extensions = ["[dD][cC][mM]", "[dD][iI][cC][oO][mM]"]
 
         # Get all files with any applicable extension
+        # Skip macOS AppleDouble sidecar files (they start with "._")
         all_files = []
         for extension in extensions:
             p = dcm_dir.glob(f"**/*.{extension}")
-            files = [x for x in p if x.is_file()]
+            files = [x for x in p if x.is_file() and not x.name.startswith("._")]
             all_files += files
 
         return all_files
@@ -1126,8 +1127,12 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         else:
             dst_path = dcm_path
 
-        # Load instance
-        instance = pydicom.dcmread(dst_path)
+        # Load instance — retry with force=True if DICM preamble is missing
+        try:
+            instance = pydicom.dcmread(dst_path)
+        except pydicom.errors.InvalidDicomError:
+            print(f"Retrying {dst_path} with force=True (missing DICM preamble)")
+            instance = pydicom.dcmread(dst_path, force=True)
 
         try:
             instance.PixelData
